@@ -1,0 +1,185 @@
+```{r}
+library(reshape2)
+library(ggplot2)
+library(scater)
+library(stringr)
+library(scRNA.seq.funcs)
+library(scran)
+library(DESeq2)
+library(edgeR)
+library(RUVSeq)
+options(stringsAsFactors = FALSE)
+```
+
+```{r}
+celltype <- read.delim("~/Documents/sc_count/celltype_all.txt")
+genecount <- read.delim("~/Documents/agg_genecount/agg_count.txt", row.names=1,check.names=FALSE)
+genetpm <- read.delim("~/Documents/agg_genecount/agg_tpm.txt", row.names=1,check.names=FALSE)
+gene_biotype <- read.delim("~/Documents/sc_count/gene_biotype.txt",row.names=1,check.names=FALSE)
+gene_biotype<-gene_biotype[rownames(genecount),]
+genecount<-data.matrix(genecount)
+genetpm<-data.matrix(genetpm)
+```
+
+```{r}
+sep2016_mapping <- read.table("~/Documents/sc_count/sep2016_dedup_mapping.txt", row.names=1, quote="\"", comment.char="")
+summary(as.numeric(sep2016_mapping[3,]))#mapping rate
+nov2016_mapping <- read.table("~/Documents/sc_count/nov2016_dedup_mapping.txt", row.names=1, quote="\"", comment.char="")
+summary(as.numeric(nov2016_mapping[3,]))
+feb2017_mapping <- read.table("~/Documents/sc_count/feb2017_dedup_mapping.txt", row.names=1, quote="\"", comment.char="")
+summary(as.numeric(feb2017_mapping[3,]))
+```
+
+```{r}
+plot_mapinfo<-function(mapping,cell){
+  mapping<-t(mapping)
+  mapping<-data.frame(mapping)
+  mapping$unmapped<-as.numeric(mapping$num_processed)-as.numeric(mapping$num_mapped)
+  mapping<-cbind(cell,mapping)
+  map_stats<-mapping[,c(1,3,5)]
+  map_stat <- melt(map_stats,id='cell')
+  map_stat$cell <- factor(map_stat$cell, levels=cell)
+  ggplot(map_stat, aes(x=cell, y=value, fill=variable)) +
+    geom_bar(stat="identity")+coord_flip()}
+
+plot_mapinfo(sep2016_mapping,cell=celltype$well[1:96])
+plot_mapinfo(nov2016_mapping[,1:96],cell=celltype$well[97:192])
+plot_mapinfo(nov2016_mapping[,97:192],cell=celltype$well[193:288])
+```
+
+```{r}
+pheno_data <- new("AnnotatedDataFrame", celltype)
+fd <- new("AnnotatedDataFrame", data = gene_biotype)
+scdata <- scater::newSCESet(countData = genecount, 
+                            phenoData = pheno_data,
+                            featureData = fd)
+tpm(scdata) <- genetpm
+```
+
+```{r}
+ig_gene<-rownames(gene_biotype)[grep("^IG_", gene_biotype[,2], perl=TRUE, value=FALSE)]#a vector of 652 gene ID
+tr_gene<-rownames(gene_biotype)[grep("^TR_", gene_biotype[,2], perl=TRUE, value=FALSE)]#a vector of 314 gene ID
+mt_gene<-rownames(gene_biotype)[which(grepl("^MT-", gene_biotype[,1], perl=TRUE) & gene_biotype[,2]=="protein_coding")]#a vector of 13 gene ID
+ercc_gene <- rownames(genecount)[grep("^ERCC", gene_biotype[,2], perl=TRUE, value=FALSE)]
+```
+
+```{r}
+QCmet <- scater::calculateQCMetrics(
+  scdata,
+  feature_controls = list(ERCC = ercc_gene, MT = mt_gene, IG = ig_gene))
+#, TR = tr_gene))
+```
+
+#plot to check IG genes
+plotPhenoData(QCmet, aesth = aes_string(x = "pct_counts_feature_controls_IG", y = "pct_counts_feature_controls_TR", colour = "cell.type"))
+
+```{r}
+#PCA on raw count/endog_genes using exprs_values="exprs/counts/tpm"
+endog_genes <- !fData(QCmet)$is_feature_control
+scater::plotPCA(QCmet[endog_genes, ], ncomponents = 2,
+                colour_by = "cell.type",
+                size_by = "total_features",
+                shape_by = "batch",
+                exprs_values = "counts")
+```
+
+```{r}
+#PCA on raw count/endog_genes using exprs_values="exprs" #exprs=log2(counts)
+endog_genes <- !fData(QCmet)$is_feature_control
+scater::plotPCA(QCmet[endog_genes, ], ncomponents = 2,
+                colour_by = "cell.type",
+                size_by = "total_features",
+                shape_by = "batch",
+                exprs_values = "exprs")
+```
+
+```{r}
+#PCA on tpm/endog_genes 
+endog_genes <- !fData(QCmet)$is_feature_control
+scater::plotPCA(QCmet[endog_genes, ], ncomponents = 2,
+                colour_by = "cell.type",
+                size_by = "total_features",
+                shape_by = "batch",
+                exprs_values = "tpm")
+```
+
+```{r}
+#PCA on norm_tpm using exprs_values="norm_tpm" #norm_tpm=log2(tpm)
+endog_genes <- !fData(QCmet)$is_feature_control
+set_exprs(QCmet, "norm_tpm") <- log2(genetpm)
+scater::plotPCA(QCmet[endog_genes, ], ncomponents = 2,
+                colour_by = "cell.type",
+                size_by = "total_features",
+                shape_by = "batch",
+                exprs_values = "norm_tpm")
+
+scater::plotQC(QCmet[endog_genes, ],
+               type = "find-pcs",
+               variable = "cell.type",
+               exprs_values = "norm_tpm")
+```
+
+```{r}
+#PCA on monocle:rpc_matrix using exprs_values="log2(norm_counts)" 
+endog_genes <- !fData(QCmet)$is_feature_control
+set_exprs(QCmet, "norm_counts") <- log2(rpc_matrix_byercc)
+scater::plotPCA(QCmet[endog_genes, ], ncomponents = 2,
+                colour_by = "cell.type",
+                size_by = "total_features",
+                shape_by = "batch",
+                exprs_values = "norm_counts")
+
+scater::plotQC(QCmet[endog_genes, ],
+               type = "find-pcs",
+               variable = "cell.type",
+               exprs_values = "norm_counts")
+```
+
+```{r}
+#filtering cells of bad quality
+map_stats<-cbind(sep2016_mapping,nov2016_mapping,feb2017_mapping)
+map_stats<-t(map_stats)
+map_stats<-data.frame(map_stats)
+drop.pct.mapped<-(map_stats$percent_mapped<20)
+drop.n.reads<-(QCmet$total_counts<2^15 & QCmet$cell.type=="T")|
+              (QCmet$total_counts<50000 & QCmet$cell.type=="P")
+drop.n.genes<-(QCmet$total_features<1500)
+drop.pct.mt<-(QCmet$pct_counts_feature_controls_MT>6)
+drop.pct.ercc<-(QCmet$pct_counts_feature_controls_ERCC>30)
+drop.control<-(QCmet$cell.type=="50"|QCmet$cell.type=="0"|QCmet$cell.type=="X")
+drop.outlier<-(QCmet$cell.type=="T"& QCmet$pct_counts_feature_controls_IG>20)
+QCmet$use<-!(drop.pct.mapped|drop.n.reads|drop.n.genes|drop.pct.mt|drop.pct.ercc|drop.control|drop.outlier)
+data.frame(ByMapPerc=sum(drop.pct.mapped),ByLibSize=sum(drop.n.reads),
+           ByFeature=sum(drop.n.genes),ByMito=sum(drop.pct.mt),
+           BySpike=sum(drop.pct.ercc),ByControl=sum(drop.control),
+           ByOutlier=sum(drop.outlier),Remaining=sum(QCmet$use))
+dropmat<-data.frame(ByMapPerc=drop.pct.mapped,ByLibSize=drop.n.reads,
+           ByFeature=drop.n.genes,ByMito=drop.pct.mt,
+           BySpike=drop.pct.ercc,ByControl=drop.control,
+           ByOutlier=drop.outlier,Remaining=QCmet$use)
+ 
+idmat<-expand.grid(1:7,1:7)
+idmat$common_num<-NA
+for (i in 1:49){
+  a<-dropmat[,idmat[i,1]]
+  b<-dropmat[,idmat[i,2]]
+  idmat$common_num[i]<-sum(a&b)
+}
+idmat<-matrix(idmat$common_num,7,7)
+colnames(idmat)<-rownames(idmat)<-c("drop.pct.mapped","drop.n.reads","drop.n.genes",
+"drop.pct.mt","drop.pct.ercc","drop.control","drop.outlier")
+print(idmat)
+```
+
+```{r}
+#Filtering out low-abundance genes
+filter_genes <- apply(counts(QCmet[, pData(QCmet)$use]), 1, 
+                      function(x) length(x[x > 1]) >= 2)
+fData(QCmet)$use <- filter_genes
+
+dim(QCmet[fData(QCmet)$use, pData(QCmet)$use])
+```
+
+```{r}
+QC<-QCmet[fData(QCmet)$use, pData(QCmet)$use]
+```
